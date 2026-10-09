@@ -12,6 +12,9 @@ namespace Reso360Spout2Renderer
         private Material? _material;
         private Mesh? _mesh;
         private readonly int _cubemapSize;
+        // カメラが実際に描く 1 面の解像度。キューブマップ (2 の冪) より小さくてよく、
+        // 面へ書き込むコマンドバッファの DrawMesh が拡大して貼る。
+        private readonly int _renderSize;
         private RenderTexture? _cubemap;
         private RenderTexture? _tempRT;
         // BuiltinRenderTextureType.CameraTarget はレンダラープロセスの VR コンテキストで
@@ -45,16 +48,19 @@ namespace Reso360Spout2Renderer
         };
         private static readonly int[] _meshIndices = { 0, 1, 2, 2, 3, 0 };
 
-        public CubemapRenderer(int cubemapSize, Shader cubemapRendererShader)
+        public CubemapRenderer(int cubemapSize, int renderSize, Shader cubemapRendererShader)
         {
             _cubemapSize = cubemapSize;
+            _renderSize  = Mathf.Clamp(renderSize, 1, cubemapSize);
             _shader   = cubemapRendererShader;
             _material = new Material(_shader);
             _mesh = new Mesh { vertices = _meshVertices, triangles = _meshIndices };
 
             _cubemap           = new RenderTexture(cubemapSize, cubemapSize, 0, RenderTextureFormat.ARGB32);
             _cubemap.dimension = TextureDimension.Cube;
-            _cubemap.Create();
+            // Unity のキューブマップは 2 の冪でないと Create に失敗し、出力が無言で真っ黒になる
+            if (!_cubemap.Create())
+                Log.Error($"Failed to create a {cubemapSize}px cubemap render texture; output will be black.");
             // コマンドバッファは _tempRT 確定後 (RebuildCommandBuffers) に作成する
         }
 
@@ -94,7 +100,32 @@ namespace Reso360Spout2Renderer
             }
         }
 
-        public void RenderCubemap(Camera camera, int faceMask, float ipdOffset, GammaConvertType gammaConvert, bool correctPosition)
+        /// <summary>
+        /// 前方半球 (+Z 側) だけで足りる投影 (VR180 / 魚眼) のとき、各面のうち描画が必要な範囲。
+        /// 面カメラのビュー空間で +Z がどちら側に来るかで決まる (ビューポート座標、y は下が 0)。
+        ///   +X 面 (yaw  90): +Z は左   → 左半分
+        ///   -X 面 (yaw -90): +Z は右   → 右半分
+        ///   +Y 面 (上向き) : +Z は下   → 下半分
+        ///   -Y 面 (下向き) : +Z は上   → 上半分
+        /// 残り半分は出力から参照されないので描かない。4 面が半分になるので画素数は 5 面 → 3 面分。
+        /// 境界 (ちょうど 90 度) でバイリニア補間が隣の texel を拾うため少しだけ余分に描く。
+        /// </summary>
+        private Rect FrontHemisphereRect(CubemapFace face)
+        {
+            float m = Mathf.Min(0.5f, 4f / _renderSize);
+            float h = 0.5f + m;
+            switch (face)
+            {
+                case CubemapFace.PositiveX: return new Rect(0f,     0f,     h,  1f);
+                case CubemapFace.NegativeX: return new Rect(1f - h, 0f,     h,  1f);
+                case CubemapFace.PositiveY: return new Rect(0f,     0f,     1f, h);
+                case CubemapFace.NegativeY: return new Rect(0f,     1f - h, 1f, h);
+                default:                    return new Rect(0f,     0f,     1f, 1f);
+            }
+        }
+
+        public void RenderCubemap(Camera camera, int faceMask, float ipdOffset, GammaConvertType gammaConvert, bool correctPosition,
+                                  bool frontHemisphereOnly = false)
         {
             // _tempRT のフォーマットが変わった場合は再生成
             if (_tempRT != null)
@@ -104,7 +135,7 @@ namespace Reso360Spout2Renderer
             }
             if (_tempRT == null)
             {
-                _tempRT = new RenderTexture(_cubemapSize, _cubemapSize, 24,
+                _tempRT = new RenderTexture(_renderSize, _renderSize, 24,
                     camera.allowHDR ? RenderTextureFormat.DefaultHDR : RenderTextureFormat.Default);
                 _tempRT.dimension = TextureDimension.Tex2D;
                 _tempRT.Create();
@@ -136,15 +167,57 @@ namespace Reso360Spout2Renderer
                 for (int i = 0; i < _commandBuffers!.Length; i++)
                 {
                     if ((faceMask & (1 << (int)_faces[i].Face)) == 0) continue;
-                    camera.AddCommandBuffer(CameraEvent.AfterEverything, _commandBuffers[i]);
+                    var rect = frontHemisphereOnly ? FrontHemisphereRect(_faces[i].Face) : new Rect(0f, 0f, 1f, 1f);
+                    bool partial = rect.width < 1f || rect.height < 1f;
+                    RenderTexture? partialRT = null;
                     try
                     {
                         camera.transform.localRotation = orgRot * _faces[i].Rotate;
                         camera.transform.localPosition = orgPos +
                             (correctPosition ? _faces[i].PositionShift * ipdOffset : Vector3.right * ipdOffset);
-                        camera.Render();
+                        if (partial)
+                        {
+                            // camera.rect は使わない。Deferred の照明パスがビューポートを正しく扱えず、
+                            // rect で絞った面ではライトで照らされる物が真っ黒になる
+                            // (ローカルホームは無照明のグリッドだけなので気づかず、宿屋のワールドで判明)。
+                            // Renderite 自身の CameraController と同じく、部分サイズの RT に全面で描いてから
+                            // _tempRT の該当位置へコピーする。
+                            int px = Mathf.RoundToInt(rect.x * _renderSize);
+                            int py = Mathf.RoundToInt(rect.y * _renderSize);
+                            int pw = Mathf.Clamp(Mathf.RoundToInt(rect.width  * _renderSize), 1, _renderSize - px);
+                            int ph = Mathf.Clamp(Mathf.RoundToInt(rect.height * _renderSize), 1, _renderSize - py);
+                            partialRT = RenderTexture.GetTemporary(pw, ph, 24, _tempRT.format);
+                            camera.targetTexture = partialRT;
+
+                            // 90 度の視錐台のうち実際に描く画素範囲だけを切り出した非対称視錐台。
+                            // カリングもこの行列で行われるので、見えない側のオブジェクトも描かれない。
+                            float n = camera.nearClipPlane;
+                            float x0 = (float)px / _renderSize, x1 = (float)(px + pw) / _renderSize;
+                            float y0 = (float)py / _renderSize, y1 = (float)(py + ph) / _renderSize;
+                            camera.projectionMatrix = Matrix4x4.Frustum(
+                                -n + 2f * n * x0, -n + 2f * n * x1,
+                                -n + 2f * n * y0, -n + 2f * n * y1,
+                                n, camera.farClipPlane);
+                            camera.Render();
+                            Graphics.CopyTexture(partialRT, 0, 0, 0, 0, pw, ph, _tempRT, 0, 0, px, py);
+                        }
+                        else
+                        {
+                            camera.targetTexture = _tempRT;
+                            camera.Render();
+                        }
+                        // _tempRT をキューブマップの面へ書き込む
+                        Graphics.ExecuteCommandBuffer(_commandBuffers[i]);
                     }
-                    finally { camera.RemoveCommandBuffer(CameraEvent.AfterEverything, _commandBuffers[i]); }
+                    finally
+                    {
+                        if (partial) camera.ResetProjectionMatrix();
+                        if (partialRT != null)
+                        {
+                            camera.targetTexture = _tempRT;
+                            RenderTexture.ReleaseTemporary(partialRT);
+                        }
+                    }
                 }
             }
             finally

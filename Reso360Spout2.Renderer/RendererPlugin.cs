@@ -12,7 +12,8 @@ namespace Reso360Spout2Renderer
     /// レンダラープロセス (Renderite.Renderer) で動作する BepInEx 5 プラグイン。
     /// 共有メモリからカメラ状態を受け取り、360度/VR180映像をSpout送信する。
     /// </summary>
-    [BepInPlugin("dev.kokoa.Reso360Spout2.Renderer", "Reso360Spout2 Renderer", "1.0.0")]
+    // バージョンは Directory.Build.props の $(Version) と揃えること (属性なので定数が必要)
+    [BepInPlugin("dev.kokoa.Reso360Spout2.Renderer", "Reso360Spout2 Renderer", "1.0.1")]
     public class RendererPlugin : BaseUnityPlugin
     {
         public static RendererPlugin? Instance { get; private set; }
@@ -29,7 +30,11 @@ namespace Reso360Spout2Renderer
         public static ConfigEntry<bool>          HIDE_LOCAL        = null!;
         public static ConfigEntry<float>         STEREO_SEPARATION = null!;
 
-        public enum CubeMapSize { Low = 512, Mid = 1024, High = 2048, Ultra = 3072 }
+        // Unity のキューブマップ RenderTexture は 2 の冪でなければ作成に失敗する
+        // (以前 Ultra = 3072 になっており、選ぶと出力が真っ黒になっていた)。
+        // Auto = 0 は出力解像度から必要な面解像度を計算する (CubemapToOtherProjection 参照)。
+        // Host 側の Reso360Plugin.RendererCubeMapSize と数値を一致させること。
+        public enum CubeMapSize { Auto = 0, Low = 512, Mid = 1024, High = 2048, Ultra = 4096 }
 
         private string _pluginDir = "";
         private UnityEntry? _unityEntry;
@@ -45,7 +50,7 @@ namespace Reso360Spout2Renderer
             const string s = "General";
             SPOUT_ENABLE     = Config.Bind(s, "SPOUT_ENABLE",     true,                        "Spout 出力を有効にする");
             PROJECTION_TYPE  = Config.Bind(s, "PROJECTION_TYPE",  ProjectionType.Equirectangular_180, "投影方式");
-            CUBEMAP_SIZE     = Config.Bind(s, "CUBEMAP_SIZE",     CubeMapSize.High,            "キューブマップサイズ");
+            CUBEMAP_SIZE     = Config.Bind(s, "CUBEMAP_SIZE",     CubeMapSize.Auto,            "キューブマップサイズ (Auto = 出力解像度に合わせる)");
             OUTPUT_WIDTH     = Config.Bind(s, "OUTPUT_WIDTH",     6144,                        "出力幅 (px)");
             OUTPUT_HEIGHT    = Config.Bind(s, "OUTPUT_HEIGHT",    3072,                        "出力高 (px)");
             RENDER_IN_STEREO = Config.Bind(s, "RENDER_IN_STEREO", true,                        "ステレオレンダリング");
@@ -64,11 +69,14 @@ namespace Reso360Spout2Renderer
             HIDE_LOCAL.SettingChanged       += (_, _2) => _unityEntry?.ApplyHideLocal();
             NEAR_CLIP.SettingChanged        += (_, _2) => { if (_unityEntry?.CameraComponent != null) _unityEntry.CameraComponent.nearClipPlane = NEAR_CLIP.Value; };
             FAR_CLIP.SettingChanged         += (_, _2) => { if (_unityEntry?.CameraComponent != null) _unityEntry.CameraComponent.farClipPlane  = FAR_CLIP.Value; };
-            CUBEMAP_SIZE.SettingChanged     += (_, _2) => { if (_unityEntry?.cubeComponent   != null) _unityEntry.cubeComponent.CubemapSize     = (int)CUBEMAP_SIZE.Value; };
+            CUBEMAP_SIZE.SettingChanged     += (_, _2) => { if (_unityEntry?.cubeComponent   != null) _unityEntry.cubeComponent.SetCubemapSize((int)CUBEMAP_SIZE.Value); };
             PROJECTION_TYPE.SettingChanged  += (_, _2) => { if (_unityEntry?.cubeComponent   != null) _unityEntry.cubeComponent.ProjectionType  = PROJECTION_TYPE.Value; };
             RENDER_IN_STEREO .SettingChanged += (_, _2) => { if (_unityEntry?.cubeComponent   != null) _unityEntry.cubeComponent.RenderInStereo  = RENDER_IN_STEREO.Value; };
             STEREO_SEPARATION.SettingChanged += (_, _2) => { if (_unityEntry?.cubeComponent   != null) _unityEntry.cubeComponent.StereoSeparation = STEREO_SEPARATION.Value; };
+            // Spout センダーを作り直す必要がある設定
             SPOUT_ENABLE     .SettingChanged += (_, _2) => _unityEntry?.UpdateSpoutState();
+            OUTPUT_WIDTH     .SettingChanged += (_, _2) => _unityEntry?.UpdateSpoutState();
+            OUTPUT_HEIGHT    .SettingChanged += (_, _2) => _unityEntry?.UpdateSpoutState();
 
             Logger.LogInfo("Reso360Spout2 Renderer plugin loaded.");
         }
@@ -90,12 +98,30 @@ namespace Reso360Spout2Renderer
         private int _initDelayFrames = 1000;
         // ホストからのコンフィグ変更を検出するためのバージョン追跡
         private int _lastConfigVersion = -1;
+        // 設定変更による Spout 再構築の予約 (1 フレームに 1 回だけ実行する)
+        private bool _spoutRebuildRequested;
+        // D3D 準備完了後のみ Spout を触ってよい
+        private bool _spoutReady;
+        // 共有テクスチャ取得の連続失敗回数 (最初の数フレームは正常に失敗する)
+        private int _sharedTextureRetries;
+        private const int SharedTextureWarnAfter = 120;
+
+        // 出力解像度の上限は D3D11 のテクスチャ上限 (16384)。
+        // これを超えると CreateSender も RenderTexture も黙って失敗する。
+        private const int MinOutputSize = 16;
+        private const int MaxOutputSize = 16384;
+
+        // センダー作成後に 1 回だけ実測する送信レート
+        private bool  _ratePending;
+        private int   _rateFrames;
+        private float _rateStartTime;
+        private const float RateWindowSeconds = 10f;
 
         void Start()
         {
             // 共有メモリを開く
             if (!_sharedMem.TryOpen())
-                Debug.LogWarning("[Reso360Spout2] Shared memory not yet available; will retry.");
+                Log.Warning("Shared memory not yet available; will retry.");
 
             // 先にカメラ作成 (cubeComponent が作られる)、その後シェーダーをセット
             CreateCamera();
@@ -121,10 +147,12 @@ namespace Reso360Spout2Renderer
                 if (_initDelayFrames > 0)
                 {
                     _initDelayFrames--;
-                    if (_initDelayFrames == 0 && RendererPlugin.SPOUT_ENABLE.Value)
+                    if (_initDelayFrames == 0)
                     {
-                        Debug.Log("[Reso360Spout2] Initializing Spout sender (deferred)...");
-                        InitSpout();
+                        Log.Info("Initializing Spout sender (deferred)...");
+                        _spoutReady = true;
+                        RebuildSpout();
+                        _spoutRebuildRequested = false;
                     }
                     return;
                 }
@@ -140,6 +168,13 @@ namespace Reso360Spout2Renderer
                     }
                 }
 
+                // 設定変更で予約された Spout 再構築をここでまとめて 1 回だけ行う
+                if (_spoutRebuildRequested)
+                {
+                    _spoutRebuildRequested = false;
+                    RebuildSpout();
+                }
+
                 // ホストプロセスからカメラ状態を受け取る
                 transform.position   = _sharedMem.ReadPosition();
                 transform.rotation   = _sharedMem.ReadRotation();
@@ -148,11 +183,15 @@ namespace Reso360Spout2Renderer
             }
             catch (Exception e)
             {
-                Debug.LogError("[Reso360Spout2] " + e);
+                Log.Error("LateUpdate failed: " + e);
             }
         }
 
-        void OnDestroy() => _sharedMem.Dispose();
+        void OnDestroy()
+        {
+            DestroySpout();
+            _sharedMem.Dispose();
+        }
 
         /// <summary>
         /// 起動時の直接適用: SettingChanged を経由せずコンポーネントに直接セットする。
@@ -169,7 +208,7 @@ namespace Reso360Spout2Renderer
                 {
                     _lastConfigVersion = ver;
                     cfg = _sharedMem.ReadConfig();
-                    Debug.Log($"[Reso360Spout2] Initial config from host (version={ver}): Projection={cfg.ProjectionType}, CubemapSize={cfg.CubemapSize}");
+                    Log.Info($"Initial config from host (version={ver}): Projection={cfg.ProjectionType}, CubemapSize={cfg.CubemapSize}");
                 }
             }
 
@@ -186,7 +225,7 @@ namespace Reso360Spout2Renderer
             RendererPlugin.STEREO_SEPARATION.Value = cfg.StereoSeparation;
 
             // Spout 系を除くコンポーネントへ直接適用 (SettingChanged は既に上で発火しているが念のため)
-            cubeComponent!.CubemapSize      = cfg.CubemapSize;
+            cubeComponent!.SetCubemapSize(cfg.CubemapSize);
             cubeComponent.ProjectionType    = cfg.ProjectionType;
             cubeComponent.RenderInStereo    = cfg.RenderInStereo;
             cubeComponent.StereoSeparation  = cfg.StereoSeparation;
@@ -201,7 +240,7 @@ namespace Reso360Spout2Renderer
         /// </summary>
         private void ApplyConfigFromHost(RendererConfig cfg)
         {
-            Debug.Log($"[Reso360Spout2] Config updated from host: SpoutEnable={cfg.SpoutEnable}, Projection={cfg.ProjectionType}, CubemapSize={cfg.CubemapSize}, {cfg.OutputWidth}x{cfg.OutputHeight}");
+            Log.Info($"Config updated from host: SpoutEnable={cfg.SpoutEnable}, Projection={cfg.ProjectionType}, CubemapSize={cfg.CubemapSize}, {cfg.OutputWidth}x{cfg.OutputHeight}");
 
             RendererPlugin.SPOUT_ENABLE    .Value = cfg.SpoutEnable;
             RendererPlugin.PROJECTION_TYPE .Value = cfg.ProjectionType;
@@ -233,7 +272,7 @@ namespace Reso360Spout2Renderer
         {
             var bundlePath = Path.Combine(PluginDir, "cubeto360");
             var bundle = AssetBundle.LoadFromFile(bundlePath);
-            if (bundle == null) { Debug.LogWarning($"[Reso360Spout2] AssetBundle not found: {bundlePath}"); return; }
+            if (bundle == null) { Log.Warning($"AssetBundle not found: {bundlePath}"); return; }
 
             Shader? cubemapShader = null, cubemapRendererShader = null;
             foreach (var shader in bundle.LoadAllAssets<Shader>())
@@ -247,7 +286,7 @@ namespace Reso360Spout2Renderer
                 cubeComponent.CubemapShader         = cubemapShader;
                 cubeComponent.CubemapRendererShader = cubemapRendererShader;
             }
-            Debug.Log("[Reso360Spout2] Shaders loaded.");
+            Log.Info("Shaders loaded.");
         }
 
         private void CreateCamera()
@@ -260,54 +299,73 @@ namespace Reso360Spout2Renderer
             CameraComponent.fieldOfView      = 90f;
             CameraComponent.stereoTargetEye  = StereoTargetEyeMask.None;
             CameraComponent.stereoSeparation = 0.065f;
+            // 描画は CubemapRenderer が camera.Render() で明示的に行う。
+            // 有効のままだと Unity が毎フレーム画面へもシーン全体を余分に描いてしまう
+            // (Resonite のカメラに上書きされるので見えず、GPU 時間だけ食う)。
+            CameraComponent.enabled = false;
 
             cubeComponent = _cameraRoot.AddComponent<CubemapToOtherProjection>();
-            Debug.Log("[Reso360Spout2] Camera created.");
-        }
-
-        private void InitSpout()
-        {
-            int w = RendererPlugin.OUTPUT_WIDTH.Value, h = RendererPlugin.OUTPUT_HEIGHT.Value;
-            Plugin        = PluginEntry.CreateSender("VRCam", w, h);
-            SourceTexture = new RenderTexture(w, h, 24);
-            cubeComponent!.RenderTarget = SourceTexture;
+            cubeComponent.FlipVertically = true;
+            Log.Info("Camera created.");
         }
 
         private void SendToSpout()
         {
-            if (Plugin == IntPtr.Zero)
-            {
-                    Debug.LogWarning("[Reso360Spout2] Spout sender not initialized; cannot send frame.");
-                    return;
-            }
+            if (Plugin == IntPtr.Zero) return;
 
             // ResoniteSpout と同様: まず Update イベントを発行してから SharedTexture を取得する
             SpoutUtil.IssueSenderPluginEvent(PluginEntry.Event.Update, Plugin);
 
             if (SharedTexture == null)
             {
+                // Update イベントはレンダースレッドで処理されるため、
+                // 共有テクスチャが用意されるまで数フレームかかる (最初の数回の失敗は正常)
                 var ptr = PluginEntry.GetTexturePointer(Plugin);
-                if (ptr != IntPtr.Zero)
+                if (ptr == IntPtr.Zero)
                 {
-                    SharedTexture = Texture2D.CreateExternalTexture(
-                        PluginEntry.GetTextureWidth(Plugin),
-                        PluginEntry.GetTextureHeight(Plugin),
-                        TextureFormat.ARGB32, false, false, ptr);
-                    SharedTexture.hideFlags = HideFlags.DontSave;
+                    if (++_sharedTextureRetries == SharedTextureWarnAfter)
+                        Log.Warning("Spout shared texture is still unavailable after " +
+                                         $"{SharedTextureWarnAfter} frames. Is KlakSpout_send.dll present in " +
+                                         "Renderite.Renderer_Data/Plugins/x86_64?");
+                    return;
                 }
-            }
-            if (SharedTexture == null)
-            {
-                Debug.LogWarning("[Reso360Spout2] Failed to get shared texture pointer from Spout plugin.");
-                return;
-            } 
 
-            // CommandBuffer の代わりに直接 Graphics 呼び出しを使用 (ResoniteSpout 方式)
-            var tempRt = RenderTexture.GetTemporary(
-                SharedTexture.width, SharedTexture.height, 0, RenderTextureFormat.ARGB32);
-            Graphics.Blit(SourceTexture, tempRt, new Vector2(1f, -1f), new Vector2(0f, 1f));
-            Graphics.CopyTexture(tempRt, SharedTexture);
-            RenderTexture.ReleaseTemporary(tempRt);
+                SharedTexture = Texture2D.CreateExternalTexture(
+                    PluginEntry.GetTextureWidth(Plugin),
+                    PluginEntry.GetTextureHeight(Plugin),
+                    TextureFormat.ARGB32, false, false, ptr);
+                SharedTexture.hideFlags = HideFlags.DontSave;
+                _sharedTextureRetries = 0;
+                Log.Info($"Spout sender ready: {SharedTexture.width}x{SharedTexture.height}");
+            }
+
+            // 上下反転は投影パス (CubemapToOtherProjection.FlipVertically) で済んでいるので、
+            // そのままコピーするだけでよい
+            Graphics.CopyTexture(SourceTexture, SharedTexture);
+
+            MeasureSendRate();
+        }
+
+        /// <summary>
+        /// センダー作成後の最初の数秒だけ送信レートを測り、1 回だけログに出す。
+        /// 高解像度が自分の GPU で実用になるかどうかは、この数字でしか分からない。
+        /// </summary>
+        private void MeasureSendRate()
+        {
+            if (!_ratePending) return;
+
+            _rateFrames++;
+            float elapsed = Time.realtimeSinceStartup - _rateStartTime;
+            if (elapsed < RateWindowSeconds) return;
+
+            _ratePending = false;
+            float fps = _rateFrames / elapsed;
+            string note = fps < 10f
+                ? " — lower OUTPUT_WIDTH/HEIGHT or CUBEMAP_SIZE if this is too slow"
+                : "";
+            Log.Info($"Spout output running at {fps:0.0} fps" +
+                     $" ({SharedTexture!.width}x{SharedTexture.height}, " +
+                     $"cubemap {cubeComponent!.CubemapSize}px/face, rendered at {cubeComponent.RenderSize}px){note}");
         }
 
         public void ApplyHideLocal() => ApplyHideLocal(RendererPlugin.HIDE_LOCAL.Value);
@@ -327,22 +385,64 @@ namespace Reso360Spout2Renderer
             }
         }
 
-        public void UpdateSpoutState()
+        /// <summary>
+        /// Spout 送信の作り直しを予約する。SPOUT_ENABLE / OUTPUT_WIDTH / OUTPUT_HEIGHT が
+        /// 変わるたびに呼ばれるが、実際の作り直しは LateUpdate で 1 フレーム 1 回にまとめる。
+        /// </summary>
+        public void UpdateSpoutState() => _spoutRebuildRequested = true;
+
+        private void RebuildSpout()
         {
-            if (RendererPlugin.SPOUT_ENABLE.Value)
+            // D3D デバイスが Spout に登録される前に CreateSender を呼ぶとクラッシュする
+            if (!_spoutReady) return;
+
+            DestroySpout();
+            if (!RendererPlugin.SPOUT_ENABLE.Value) return;
+
+            int requestedW = RendererPlugin.OUTPUT_WIDTH.Value;
+            int requestedH = RendererPlugin.OUTPUT_HEIGHT.Value;
+            int w = Mathf.Clamp(requestedW, MinOutputSize, MaxOutputSize);
+            int h = Mathf.Clamp(requestedH, MinOutputSize, MaxOutputSize);
+            if (w != requestedW || h != requestedH)
+                Log.Warning($"Output size {requestedW}x{requestedH} is out of range " +
+                            $"({MinOutputSize}..{MaxOutputSize}); using {w}x{h}.");
+
+            Plugin = PluginEntry.CreateSender("VRCam", w, h);
+            if (Plugin == IntPtr.Zero)
             {
-                int w = RendererPlugin.OUTPUT_WIDTH.Value, h = RendererPlugin.OUTPUT_HEIGHT.Value;
-                Plugin        = PluginEntry.CreateSender("VRCam", w, h);
-                SourceTexture = new RenderTexture(w, h, 24);
-                cubeComponent!.RenderTarget = SourceTexture;
+                Log.Error("CreateSender failed. KlakSpout_send.dll is probably not loaded by " +
+                               "Unity (it must live in Renderite.Renderer_Data/Plugins/x86_64; " +
+                               "Reso360Spout2.Patcher puts it there at startup).");
+                return;
             }
-            else
+
+            // 投影パスの Blit 先でしかないので深度バッファは不要
+            SourceTexture = new RenderTexture(w, h, 0, RenderTextureFormat.ARGB32);
+            // RenderTarget をセットすると CUBEMAP_SIZE = Auto のキューブマップ解像度も再計算される
+            cubeComponent!.RenderTarget = SourceTexture;
+            Log.Info($"Spout sender created: {w}x{h} (cubemap {cubeComponent.CubemapSize}px/face, rendered at {cubeComponent.RenderSize}px)");
+
+            // 解像度を上げたときに実際に何 fps 出るのかは、やってみないと分からない。
+            // 作り直しのたびに 1 回だけ実測して出す。
+            _rateFrames = 0;
+            _rateStartTime = Time.realtimeSinceStartup;
+            _ratePending = true;
+        }
+
+        private void DestroySpout()
+        {
+            // 旧センダーの共有テクスチャを掴んだままにしない。
+            // ネイティブ側を破棄する前に、それを参照する外部テクスチャを先に捨てる (KlakSpout v1 と同じ順序)
+            if (SharedTexture != null) { Destroy(SharedTexture); SharedTexture = null; }
+            if (Plugin != IntPtr.Zero)
             {
-                if (Plugin != IntPtr.Zero) SpoutUtil.IssueSenderPluginEvent(PluginEntry.Event.Dispose, Plugin);
+                // レンダーイベントでは破棄できない (KlakSpout v1。PluginEntry 参照)
+                PluginEntry.DestroySharedObject(Plugin);
                 Plugin = IntPtr.Zero;
-                SourceTexture = null;
-                if (cubeComponent != null) cubeComponent.RenderTarget = null;
             }
+            if (SourceTexture != null) { SourceTexture.Release(); Destroy(SourceTexture); SourceTexture = null; }
+            if (cubeComponent != null) cubeComponent.RenderTarget = null;
+            _sharedTextureRetries = 0;
         }
     }
 }

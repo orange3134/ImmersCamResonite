@@ -6,23 +6,20 @@
     <RootNamespace>Reso360Spout2Renderer</RootNamespace>
     <OutputType>Library</OutputType>
     <Nullable>enable</Nullable>
-    <LangVersion>9</LangVersion><!-- BepInEx 5 プロファイル (Renderer プロセス) -->
-    <GaleProfileDir>$(APPDATA)\com.kesomannen.gale\resonite\profiles\360Spout\</GaleProfileDir>
-    <RendererBepInExDir>$(GaleProfileDir)Renderer\BepInEx\</RendererBepInExDir>
+    <LangVersion>9</LangVersion>
+    <!-- RendererCoreDir / RendererBepInExDir / RendererManagedDir は Directory.Build.props が解決する -->
+    <NeedsRendererBepInEx>true</NeedsRendererBepInEx>
     <RendererPluginTargetDir>$(RendererBepInExDir)plugins\Reso360Spout2.Renderer\</RendererPluginTargetDir>
-    <!-- Unity DLL パス -->
-    <GamePath Condition="Exists('$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite\')">$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite\</GamePath>
-    <RendererManagedDir>$(GamePath)Renderer\Renderite.Renderer_Data\Managed\</RendererManagedDir>
   </PropertyGroup>
 
-  <!-- BepInEx 5 core (レンダラープロセス用) -->
+  <!-- BepInEx 5 core (レンダラープロセス用)。参照元はデプロイ先ではなく RendererCoreDir -->
   <ItemGroup>
     <Reference Include="BepInEx">
-      <HintPath>$(RendererBepInExDir)core\BepInEx.dll</HintPath>
+      <HintPath>$(RendererCoreDir)BepInEx.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="0Harmony">
-      <HintPath>$(RendererBepInExDir)core\0Harmony20.dll</HintPath>
+      <HintPath>$(RendererCoreDir)0Harmony20.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
@@ -61,7 +58,7 @@
   </ItemGroup>
 
   <!-- Post-build: レンダラー BepInEx プラグインフォルダにコピー -->
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="Exists('$(RendererBepInExDir)')">
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(ModDeployDir)' != ''">
     <MakeDir Directories="$(RendererPluginTargetDir)" />
     <ItemGroup>
       <PluginFiles Include="$(TargetPath)" />
@@ -74,16 +71,12 @@
     <Message Text="Copied renderer plugin to $(RendererPluginTargetDir)" Importance="high" />
   </Target>
 
-  <!-- Post-build: KlakSpout_send.dll を Unity ネイティブプラグインフォルダにコピー -->
-  <!-- Unity はここにある DLL を起動時にロードし UnityPluginLoad を呼び出して D3D11 デバイスを登録する -->
-  <PropertyGroup>
-    <UnityNativePluginDir>$(GamePath)Renderer\Renderite.Renderer_Data\Plugins\x86_64\</UnityNativePluginDir>
-  </PropertyGroup>
-  <Target Name="CopyNativePlugin" AfterTargets="PostBuildEvent" Condition="Exists('$(UnityNativePluginDir)')">
-    <Copy SourceFiles="$(TargetDir)KlakSpout_send.dll"
-          DestinationFolder="$(UnityNativePluginDir)"
-          SkipUnchangedFiles="true" />
-    <Message Text="Copied KlakSpout_send.dll to Unity native plugins: $(UnityNativePluginDir)" Importance="high" />
-  </Target>
+  <!--
+    KlakSpout_send.dll を Unity ネイティブプラグインフォルダ
+    (Renderite.Renderer_Data/Plugins/x86_64) へ配置するのは
+    Reso360Spout2.Patcher の仕事なので、ここではコピーしない。
+    ビルド時にコピーしてしまうと、パッチャーが壊れていても開発機だけ動いてしまい
+    配布先で初めて壊れる (実際に 1.0.1 でそうなっていた)。
+  -->
 
 </Project>

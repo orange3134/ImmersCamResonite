@@ -1,0 +1,110 @@
+<Project>
+
+  <!--
+    Resonite のインストール先 (GamePath) とデプロイ先 (ModDeployDir) を 3 プロジェクト共通で解決する。
+
+    解決の優先順位:
+      1. ResonitePath プロパティ / RESONITE_PATH 環境変数
+      2. Steam ライブラリ走査 (レジストリ + libraryfolders.vdf)
+      3. 既定のインストールパス (Windows / Linux)
+
+    デプロイ先は既定で Gale の "360Spout" プロファイル (存在する場合)、無ければゲーム本体フォルダ。
+    別の場所へ入れたい場合は次のように指定する:
+      dotnet build -p:ModDeployDir="C:\...\gale\resonite\profiles\OtherProfile\"
+  -->
+
+  <!--
+    MOD のバージョン。3 プロジェクト共通で、Directory.Build.targets の PackTS が
+    tcli の package-version 引数に渡す。
+    更新するときは thunderstore.toml の versionNumber、manifest.json の version_number、
+    RendererPlugin.cs の [BepInPlugin] 第 3 引数も揃えること (CLAUDE.md の「リリース手順」参照)。
+  -->
+  <PropertyGroup>
+    <Version>1.0.1</Version>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And '$(RESONITE_PATH)' != ''">$(RESONITE_PATH)</ResonitePath>
+  </PropertyGroup>
+
+  <!-- Steam ライブラリの列挙 -->
+  <PropertyGroup Condition="'$(ResonitePath)' == ''">
+    <_SteamRoot Condition="'$(OS)' == 'Windows_NT'">$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\Software\Valve\Steam', 'SteamPath', null, RegistryView.Registry64))</_SteamRoot>
+    <_SteamRoot Condition="'$(_SteamRoot)' == '' And '$(OS)' == 'Windows_NT'">$(MSBuildProgramFiles32)\Steam</_SteamRoot>
+    <_SteamRoot Condition="'$(_SteamRoot)' == ''">$(HOME)/.steam/steam</_SteamRoot>
+
+    <_LibVdf>$(_SteamRoot)/steamapps/libraryfolders.vdf</_LibVdf>
+    <_LibVdfText Condition="Exists('$(_LibVdf)')">$([System.IO.File]::ReadAllText('$(_LibVdf)'))</_LibVdfText>
+    <!-- Regex.Split の結果 (string[]) は ';' 区切り文字列として渡ってくる。
+         [0] はヘッダなので [1] 以降が各ライブラリのパス (末尾に VDF の続きが付くので " で切る)。 -->
+    <_LibSplit Condition="'$(_LibVdfText)' != ''">$([System.Text.RegularExpressions.Regex]::Split($(_LibVdfText), '"path"\s*"'))</_LibSplit>
+    <_LibCount Condition="'$(_LibSplit)' != ''">$(_LibSplit.Split(';').Length)</_LibCount>
+    <_LibCount Condition="'$(_LibCount)' == ''">0</_LibCount>
+
+    <_Lib1 Condition="$(_LibCount) &gt; 1">$(_LibSplit.Split(';')[1].Split('&quot;')[0].Replace('\\','\'))</_Lib1>
+    <_Lib2 Condition="$(_LibCount) &gt; 2">$(_LibSplit.Split(';')[2].Split('&quot;')[0].Replace('\\','\'))</_Lib2>
+    <_Lib3 Condition="$(_LibCount) &gt; 3">$(_LibSplit.Split(';')[3].Split('&quot;')[0].Replace('\\','\'))</_Lib3>
+    <_Lib4 Condition="$(_LibCount) &gt; 4">$(_LibSplit.Split(';')[4].Split('&quot;')[0].Replace('\\','\'))</_Lib4>
+    <_Lib5 Condition="$(_LibCount) &gt; 5">$(_LibSplit.Split(';')[5].Split('&quot;')[0].Replace('\\','\'))</_Lib5>
+    <_Lib6 Condition="$(_LibCount) &gt; 6">$(_LibSplit.Split(';')[6].Split('&quot;')[0].Replace('\\','\'))</_Lib6>
+    <_Lib7 Condition="$(_LibCount) &gt; 7">$(_LibSplit.Split(';')[7].Split('&quot;')[0].Replace('\\','\'))</_Lib7>
+    <_Lib8 Condition="$(_LibCount) &gt; 8">$(_LibSplit.Split(';')[8].Split('&quot;')[0].Replace('\\','\'))</_Lib8>
+
+    <!-- FrooxEngine.dll の有無でインストールを判定し、最初に見つかったものを採用する -->
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib1)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib1)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib2)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib2)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib3)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib3)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib4)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib4)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib5)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib5)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib6)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib6)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib7)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib7)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(_Lib8)/steamapps/common/Resonite/FrooxEngine.dll')">$(_Lib8)/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite\FrooxEngine.dll')">$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(HOME)/.steam/steam/steamapps/common/Resonite/FrooxEngine.dll')">$(HOME)/.steam/steam/steamapps/common/Resonite</ResonitePath>
+    <ResonitePath Condition="'$(ResonitePath)' == '' And Exists('$(HOME)/.local/share/Steam/steamapps/common/Resonite/FrooxEngine.dll')">$(HOME)/.local/share/Steam/steamapps/common/Resonite</ResonitePath>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- 末尾のディレクトリ区切りを必ず 1 個つける (csproj が $(GamePath)Foo.dll と連結するため) -->
+    <GamePath Condition="'$(ResonitePath)' != ''">$([MSBuild]::EnsureTrailingSlash('$(ResonitePath)'))</GamePath>
+
+    <!--
+      デプロイ先。既定は Gale の "360Spout" プロファイル (存在する場合)、無ければゲーム本体フォルダ。
+      -p:ModDeployDir=... はグローバルプロパティなのでプロジェクト側から上書きできない
+      (代入しても黙って無視される)。末尾区切りを足した結果は必ず別プロパティに入れること。
+      以前は ModDeployDir 自身に EnsureTrailingSlash した結果を代入していたため、
+      コマンドラインで渡したときだけ区切りが付かず "...\profileRenderer\BepInEx" のような
+      パスへコピーされていた。
+    -->
+    <_GaleProfileDir>$(APPDATA)\com.kesomannen.gale\resonite\profiles\360Spout\</_GaleProfileDir>
+    <ModDeployDir Condition="'$(ModDeployDir)' == '' And '$(APPDATA)' != '' And Exists('$(_GaleProfileDir)')">$(_GaleProfileDir)</ModDeployDir>
+    <ModDeployDir Condition="'$(ModDeployDir)' == ''">$(GamePath)</ModDeployDir>
+    <ModDeployRoot Condition="'$(ModDeployDir)' != ''">$([MSBuild]::EnsureTrailingSlash('$(ModDeployDir)'))</ModDeployRoot>
+
+    <!-- 各プロセスの BepInEx デプロイ先 -->
+    <HostBepInExDir>$(ModDeployRoot)BepInEx\</HostBepInExDir>
+    <RendererBepInExDir>$(ModDeployRoot)Renderer\BepInEx\</RendererBepInExDir>
+    <!-- Unity ネイティブプラグイン / Managed は必ずゲーム本体側 -->
+    <UnityNativePluginDir>$(GamePath)Renderer\Renderite.Renderer_Data\Plugins\x86_64\</UnityNativePluginDir>
+    <RendererManagedDir>$(GamePath)Renderer\Renderite.Renderer_Data\Managed\</RendererManagedDir>
+
+    <!--
+      Renderer 側 BepInEx 5 の *参照* 元。
+      デプロイ先とは分けること。-p:ModDeployDir で Mod Manager のプロファイルや
+      空フォルダを指定したとき、そこに BepInEx コアが無いと参照解決に失敗して
+      ビルドごと壊れる (実際にそうなっていた)。
+      デプロイ先 → ゲーム本体 の順に、実在する方を使う。
+    -->
+    <RendererCoreDir Condition="Exists('$(RendererBepInExDir)core\BepInEx.dll')">$(RendererBepInExDir)core\</RendererCoreDir>
+    <RendererCoreDir Condition="'$(RendererCoreDir)' == '' And Exists('$(GamePath)Renderer\BepInEx\core\BepInEx.dll')">$(GamePath)Renderer\BepInEx\core\</RendererCoreDir>
+  </PropertyGroup>
+
+  <Target Name="ReportResonitePath" BeforeTargets="BeforeBuild">
+    <Message Importance="high" Text="Resonite: $(GamePath)  ->  deploy: $(ModDeployRoot)" />
+    <Error Condition="'$(GamePath)' == ''"
+           Text="Resonite のインストール先を検出できませんでした。-p:ResonitePath=&lt;path&gt; または環境変数 RESONITE_PATH を指定してください。" />
+    <Error Condition="'$(RendererCoreDir)' == '' And '$(NeedsRendererBepInEx)' == 'true'"
+           Text="Renderer 側の BepInEx 5 が見つかりません ($(GamePath)Renderer\BepInEx\core\BepInEx.dll)。Thunderstore の ResoniteModding-BepInExRenderer をインストールしてください。" />
+  </Target>
+
+</Project>

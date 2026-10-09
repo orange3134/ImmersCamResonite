@@ -7,18 +7,21 @@
     <OutputType>Library</OutputType>
     <Nullable>enable</Nullable>
     <LangVersion>9</LangVersion>
-    <!-- BepInEx 5 プリローダー / パッチャー (Renderer プロセス用) -->
-    <GaleProfileDir>$(APPDATA)\com.kesomannen.gale\resonite\profiles\360Spout\</GaleProfileDir>
-    <RendererBepInExDir>$(GaleProfileDir)Renderer\BepInEx\</RendererBepInExDir>
+    <!-- BepInEx 5 プリローダー / パッチャー (Renderer プロセス用)。
+         RendererCoreDir / RendererBepInExDir は Directory.Build.props が解決する -->
+    <NeedsRendererBepInEx>true</NeedsRendererBepInEx>
     <!-- パッチャーは plugins ではなく patchers に置く -->
     <PatcherTargetDir>$(RendererBepInExDir)patchers\Reso360Spout2.Patcher\</PatcherTargetDir>
-    <GamePath Condition="Exists('$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite\')">$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite\</GamePath>
   </PropertyGroup>
 
-  <!-- BepInEx 5 core (プリローダー API) -->
+  <!-- BepInEx 5 core (プリローダー API)。参照元はデプロイ先ではなく RendererCoreDir -->
   <ItemGroup>
     <Reference Include="BepInEx">
-      <HintPath>$(RendererBepInExDir)core\BepInEx.dll</HintPath>
+      <HintPath>$(RendererCoreDir)BepInEx.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Mono.Cecil">
+      <HintPath>$(RendererCoreDir)Mono.Cecil.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>
@@ -31,7 +34,7 @@
   </ItemGroup>
 
   <!-- Post-build: パッチャーフォルダにコピー -->
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="Exists('$(RendererBepInExDir)')">
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent" Condition="'$(ModDeployDir)' != ''">
     <MakeDir Directories="$(PatcherTargetDir)" />
     <ItemGroup>
       <PatcherFiles Include="$(TargetPath)" />

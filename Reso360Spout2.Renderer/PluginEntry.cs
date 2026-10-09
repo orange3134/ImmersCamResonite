@@ -9,7 +9,8 @@ namespace Reso360Spout2Renderer
 {
     static class PluginEntry
     {
-        internal enum Event { Update, Dispose }
+        // KlakSpout v1 のレンダーイベントは ID を見ないので、破棄用のイベントは存在しない
+        internal enum Event { Update }
 
         internal static bool IsAvailable =>
             SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Direct3D11;
@@ -21,6 +22,13 @@ namespace Reso360Spout2Renderer
 
         [DllImport("KlakSpout_send", EntryPoint = "CreateSender")]
         internal static extern IntPtr CreateSender(string name, int width, int height);
+
+        // KlakSpout_send.dll は KlakSpout v1 系で、レンダーイベントは ID もデータも見ない。
+        // 破棄イベントを発行しても何も起きないので、破棄は必ずこれで行う
+        // (以前はイベントで済ませており、作り直すたびに共有テクスチャがリークし
+        //  SPOUT_ENABLE = false にしても "VRCam" が一覧に残っていた)。
+        [DllImport("KlakSpout_send", EntryPoint = "DestroySharedObject")]
+        internal static extern void DestroySharedObject(IntPtr ptr);
 
         [DllImport("KlakSpout_send", EntryPoint = "GetTexturePointer")]
         internal static extern IntPtr GetTexturePointer(IntPtr ptr);

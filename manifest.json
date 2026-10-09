@@ -4,8 +4,12 @@
   "website_url": "https://github.com/orange3134/ImmersCamResonite",
   "description": "A MOD for recording VR180 video in Resonite.",
   "dependencies": [
-    "ResoniteModding-BepisLoader-1.5.1",
+    "ResoniteModding-BepisLoader-1.7.0",
+    "ResoniteModding-BepInExResoniteShim-0.9.3",
     "ResoniteModding-BepisResoniteWrapper-1.0.2",
-    "ResoniteModding-RenderiteHook-1.1.1"
+    "ResoniteModding-RenderiteHook-1.1.1",
+    "ResoniteModding-BepInExRenderer-5.4.233001",
+    "ResoniteModding-BepisModSettings-1.6.6",
+    "ResoniteModding-BepisLocaleLoader-1.2.2"
   ]
 }

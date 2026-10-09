@@ -7,7 +7,7 @@ namespace Reso360Spout2Renderer
     /// <summary>
     /// ホストプロセスが書き込んだカメラ状態とレンダラー設定を共有メモリから読み取る。
     ///
-    /// 構造: 80 bytes
+    /// 構造: 84 bytes (Plugin.cs の SHARED_MEM_SIZE と必ず一致させること)
     ///   [0-11]  position (x, y, z)           float × 3
     ///   [12-27] rotation (x, y, z, w)        float × 4
     ///   [28-39] scale    (x, y, z)           float × 3
@@ -133,7 +133,7 @@ namespace Reso360Spout2Renderer
         {
             SpoutEnable      = true,
             ProjectionType   = ProjectionType.Equirectangular_180,
-            CubemapSize      = 2048,
+            CubemapSize      = CubemapToOtherProjection.AutoCubemapSize,
             OutputWidth      = 6144,
             OutputHeight     = 3072,
             RenderInStereo   = true,

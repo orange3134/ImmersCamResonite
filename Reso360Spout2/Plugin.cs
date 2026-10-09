@@ -7,6 +7,7 @@ using BepisResoniteWrapper;
 using HarmonyLib;
 using System;
 using System.IO.MemoryMappedFiles;
+using System.Linq;
 
 namespace Reso360Spout2;
 
@@ -39,7 +40,10 @@ public class Reso360Plugin : BasePlugin
 
     // Renderer 側の enum と値が一致するよう同じ数値を使う
     public enum RendererProjectionType { Equirectangular_360 = 0, Equirectangular_180 = 1, FishEye_Circumference = 2, FishEye_Diagonal = 3 }
-    public enum RendererCubeMapSize    { Low = 512, Mid = 1024, High = 2048, Ultra = 3072 }
+    // Unity のキューブマップ RenderTexture は 2 の冪でないと作成に失敗し、出力が真っ黒になる。
+    // Auto = 0 は Renderer 側が出力解像度から必要な面解像度を計算する。
+    // Renderer 側の RendererPlugin.CubeMapSize と数値を一致させること。
+    public enum RendererCubeMapSize    { Auto = 0, Low = 512, Mid = 1024, High = 2048, Ultra = 4096 }
 
     // ---- 共有メモリ -----------------------------------------------------------
     // カメラ状態 (40 bytes) + コンフィグチャンネル (44 bytes) = 84 bytes
@@ -69,6 +73,10 @@ public class Reso360Plugin : BasePlugin
         Log = base.Log;
 
         // 共有メモリ作成（レンダラーより先に起動するため CreateOrOpen）
+        //
+        // 名前付き MemoryMappedFile は Windows 専用 (CA1416)。Spout 自体が DirectX 前提で
+        // Windows でしか動かないので、この MOD も Windows 専用。
+        // Linux では例外になるが、握りつぶしてログを出すだけにして本体の起動は妨げない。
         try
         {
             _sharedMem     = MemoryMappedFile.CreateOrOpen(SHARED_MEM_NAME, SHARED_MEM_SIZE);
@@ -77,7 +85,7 @@ public class Reso360Plugin : BasePlugin
         }
         catch (Exception e)
         {
-            Log.LogError("[Reso360Spout2] Failed to create shared memory: " + e);
+            Log.LogError("[Reso360Spout2] Failed to create shared memory (this MOD is Windows-only): " + e);
         }
 
         const string gs = "General";
@@ -87,7 +95,7 @@ public class Reso360Plugin : BasePlugin
         const string rs = "Renderer";
         R_SPOUT_ENABLE     = Config.Bind(rs, "SPOUT_ENABLE",     true,                                    "Spout 出力を有効にする");
         R_PROJECTION_TYPE  = Config.Bind(rs, "PROJECTION_TYPE",  RendererProjectionType.Equirectangular_180, "投影方式");
-        R_CUBEMAP_SIZE     = Config.Bind(rs, "CUBEMAP_SIZE",     RendererCubeMapSize.High,                "キューブマップサイズ");
+        R_CUBEMAP_SIZE     = Config.Bind(rs, "CUBEMAP_SIZE",     RendererCubeMapSize.Auto,                "キューブマップサイズ (Auto = 出力解像度に合わせる)");
         R_OUTPUT_WIDTH     = Config.Bind(rs, "OUTPUT_WIDTH",     6144,                                    "出力幅 (px)");
         R_OUTPUT_HEIGHT    = Config.Bind(rs, "OUTPUT_HEIGHT",    3072,                                    "出力高 (px)");
         R_RENDER_IN_STEREO = Config.Bind(rs, "RENDER_IN_STEREO", true,                                    "ステレオレンダリング");
@@ -162,14 +170,21 @@ public class Reso360Plugin : BasePlugin
     [HarmonyPatch(typeof(FrooxEngine.Engine), "RunUpdateLoop")]
     class Patch
     {
+        // FindChildInHierarchy は階層全走査なので毎フレーム呼ばずにキャッシュする
+        private static FrooxEngine.Slot?  _cachedSlot;
+        private static FrooxEngine.World? _cachedWorld;
+        private static string?            _cachedName;
+        private static int                _searchCooldown;
+        private static bool               _loggedMissing;
+
         static void Postfix(FrooxEngine.Engine __instance)
         {
-            if (__instance.WorldManager.FocusedWorld == null) return;
+            var world = __instance.WorldManager.FocusedWorld;
+            if (world == null) return;
 
-            __instance.WorldManager.FocusedWorld.RunSynchronously(() =>
+            world.RunSynchronously(() =>
             {
-                var slot = __instance.WorldManager.FocusedWorld.RootSlot
-                    .FindChildInHierarchy(CAMERA_SLOT_NAME.Value);
+                var slot = ResolveCameraSlot(world);
                 if (slot == null) return;
 
                 WriteCameraState(
@@ -177,6 +192,47 @@ public class Reso360Plugin : BasePlugin
                     slot.GlobalRotation.X, slot.GlobalRotation.Y, slot.GlobalRotation.Z, slot.GlobalRotation.W,
                     slot.GlobalScale.X,    slot.GlobalScale.Y,    slot.GlobalScale.Z);
             });
+        }
+
+        /// <summary>カメラスロットを解決する。見つかった参照はワールド / 設定名が変わるまで使い回す。</summary>
+        private static FrooxEngine.Slot? ResolveCameraSlot(FrooxEngine.World world)
+        {
+            string name = CAMERA_SLOT_NAME.Value;
+
+            // キャッシュが有効ならそのまま使う
+            if (_cachedSlot != null && !_cachedSlot.IsDestroyed &&
+                _cachedWorld == world && _cachedName == name)
+                return _cachedSlot;
+
+            if (_cachedWorld != world || _cachedName != name)
+            {
+                _cachedWorld    = world;
+                _cachedName     = name;
+                _searchCooldown = 0;
+                _loggedMissing  = false;
+            }
+            _cachedSlot = null;
+
+            // 見つからない間、毎フレーム階層全走査しないよう間引く
+            if (_searchCooldown > 0) { _searchCooldown--; return null; }
+
+            var slot = world.RootSlot.FindChildInHierarchy(name);
+            if (slot != null)
+            {
+                _cachedSlot    = slot;
+                _loggedMissing = false;
+                Log.LogInfo($"[Reso360Spout2] Camera slot '{name}' found in '{world.RawName}'.");
+                return slot;
+            }
+
+            _searchCooldown = 60;   // 約 1 秒おきに再探索
+            if (!_loggedMissing)
+            {
+                _loggedMissing = true;
+                Log.LogInfo($"[Reso360Spout2] Camera slot '{name}' not found in '{world.RawName}'. " +
+                            $"Root children: {string.Join(", ", world.RootSlot.Children.Select(c => c.Name))}");
+            }
+            return null;
         }
     }
 }

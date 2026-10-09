@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Version>1.0.0</Version>
+    <!-- Version は Directory.Build.props で 3 プロジェクト共通に定義している -->
     <Authors>orange</Authors>
     <TargetFramework>net10.0</TargetFramework>
     <RepositoryUrl>https://github.com/orange3134/Reso360Spout2</RepositoryUrl>
@@ -14,13 +14,8 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <CopyToPlugins>true</CopyToPlugins>
     <ThunderstorePackable>true</ThunderstorePackable>
-    <GamePath Condition="'$(ResonitePath)' != ''">$(ResonitePath)/</GamePath>
-    <GamePath Condition="Exists('$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite\')">$(MSBuildProgramFiles32)\Steam\steamapps\common\Resonite\</GamePath>
-    <GamePath Condition="Exists('$(HOME)/.steam/steam/steamapps/common/Resonite/')">$(HOME)/.steam/steam/steamapps/common/Resonite/</GamePath>
-    <!-- Gale プロファイルフォルダ (優先) / Resonite 直接インストール (フォールバック) -->
-    <GaleProfileDir>$(APPDATA)\com.kesomannen.gale\resonite\profiles\360Spout\</GaleProfileDir>
-    <PluginTargetDir Condition="Exists('$(GaleProfileDir)')">$(GaleProfileDir)BepInEx\plugins\orange-Reso360Spout2\Reso360Spout2</PluginTargetDir>
-    <PluginTargetDir Condition="!Exists('$(GaleProfileDir)')">$(GamePath)BepInEx\plugins\$(AssemblyName)</PluginTargetDir>
+    <!-- GamePath / ModDeployDir は Directory.Build.props が解決する -->
+    <PluginTargetDir>$(HostBepInExDir)plugins\$(AssemblyName)</PluginTargetDir>
     <RestoreAdditionalProjectSources>
       https://nuget-modding.resonite.net/v3/index.json;
     </RestoreAdditionalProjectSources>
@@ -55,13 +50,15 @@
   </ItemGroup>
 
   <!-- Post-build copy to host plugin folder -->
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent"
+          Condition="'$(CopyToPlugins)' == 'true' And '$(ModDeployDir)' != ''">
+    <MakeDir Directories="$(PluginTargetDir)" />
     <ItemGroup>
       <PluginFiles Include="$(TargetPath)" />
       <PluginFiles Include="$(TargetDir)$(TargetName).pdb" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
     </ItemGroup>
-    <Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(PluginTargetDir)" Condition="'$(CopyToPlugins)' == 'true'" />
-    <Message Text="Copied host plugin to $(PluginTargetDir)" Importance="high" Condition="'$(CopyToPlugins)' == 'true'" />
+    <Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(PluginTargetDir)" />
+    <Message Text="Copied host plugin to $(PluginTargetDir)" Importance="high" />
   </Target>
 
 </Project>
